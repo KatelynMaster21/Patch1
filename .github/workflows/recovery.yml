@@ -71,7 +71,12 @@ jobs:
           exit 1
         fi
 
-        python3 avbtool extract_public_key --key phh.pem --output phh.pub.bin
+        # Install avbtool if not present
+        if ! command -v avbtool &> /dev/null; then
+          pip3 install avbtool
+        fi
+
+        python3 -m avbtool extract_public_key --key phh.pem --output phh.pub.bin
 
         # Use the original recovery.img size for partition_size
         if [ ! -f recovery.img ]; then
@@ -82,19 +87,27 @@ jobs:
         PART_SIZE=$(stat -c%s recovery.img)
         echo "Partition size (bytes): $PART_SIZE"
 
-        python3 avbtool add_hash_footer --partition_name recovery --partition_size "$PART_SIZE" --image "$PATCHED_IMAGE" --key phh.pem --algorithm SHA256_RSA4096
+        python3 -m avbtool add_hash_footer --partition_name recovery --partition_size "$PART_SIZE" --image "$PATCHED_IMAGE" --key phh.pem --algorithm SHA256_RSA4096
 
         mkdir -p output
         # copy the patched image into output/ as recovery.img for downstream steps
         cp -f "$PATCHED_IMAGE" output/recovery.img
         cd output
         tar cvf fastbootd-recovery.tar recovery.img
-        md5sum -t fastbootd-recovery.tar >> fastbootd-recovery.tar
-        mv fastbootd-recovery.tar fastbootd-recovery.tar.md5
+        md5sum fastbootd-recovery.tar > fastbootd-recovery.tar.md5
+        cat fastbootd-recovery.tar >> fastbootd-recovery.tar.md5
+        ls -lh
 
     - name: Upload to Release
       uses: softprops/action-gh-release@v2
       with:
-        files: output/*.md5
+        files: output/fastbootd-recovery.tar.md5
         name: Patched-Recovery
         tag_name: ${{ github.run_id }}
+
+    - name: Upload Artifacts (Backup)
+      uses: actions/upload-artifact@v4
+      with:
+        name: recovery-artifacts
+        path: output/
+        retention-days: 30
