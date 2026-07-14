@@ -15,6 +15,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: write
 
@@ -22,14 +23,20 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Prepare environment
+    - name: Prepare environment and install dependencies
       run: |
         set -euo pipefail
-        echo "Installing dependencies..."
+        echo "::group::Installing dependencies"
         sudo apt-get update
         sudo apt-get install -y \
           git wget lz4 tar openssl python3 python3-pip coreutils curl
-        echo "Environment prepared successfully"
+        echo "::endgroup::"
+        
+        echo "::group::Installing Python tools"
+        pip3 install --no-cache-dir 'avbtool==1.2.0'
+        echo "::endgroup::"
+        
+        echo "::notice title=Environment::Environment prepared successfully"
 
     - name: Validate workflow inputs
       run: |
@@ -39,27 +46,25 @@ jobs:
         
         # Check for default placeholder
         if [[ "$URL" == "https://files.catbox.moe/(RECOMMENDED)" ]]; then
-          echo "❌ ERROR: Please provide a valid RECOVERY_URL"
-          echo "   Do not use the default placeholder value"
+          echo "::error title=Invalid URL::Please provide a valid RECOVERY_URL - do not use the default placeholder value"
           exit 1
         fi
         
         # Validate URL format
         if ! [[ "$URL" =~ ^https?:// ]]; then
-          echo "❌ ERROR: Invalid URL format: $URL"
-          echo "   URL must start with http:// or https://"
+          echo "::error title=Invalid URL format::URL must start with http:// or https:// (got: $URL)"
           exit 1
         fi
         
         # Check if URL is reachable (HEAD request only)
-        echo "Checking URL accessibility..."
+        echo "::notice::Checking URL accessibility..."
         if ! curl -sI --max-time 10 "$URL" > /dev/null 2>&1; then
-          echo "⚠️  WARNING: URL may be unreachable, proceeding anyway..."
+          echo "::warning title=URL Unreachable::URL may be unreachable, proceeding anyway..."
         else
-          echo "✓ URL is accessible"
+          echo "::notice::✓ URL is accessible"
         fi
         
-        echo "✓ Recovery URL validated: $URL"
+        echo "::notice title=Recovery URL Validated::$URL"
 
     - name: Download recovery image with retry
       run: |
@@ -71,7 +76,7 @@ jobs:
         TIMEOUT=60
         OUTPUT_FILE="recovery.img"
         
-        echo "Downloading recovery image from: $URL"
+        echo "::notice::Downloading recovery image from: $URL"
         
         for attempt in $(seq 1 $MAX_RETRIES); do
           echo "Attempt $attempt/$MAX_RETRIES..."
@@ -89,46 +94,44 @@ jobs:
             echo "⚠️  Download failed, retrying in ${RETRY_DELAY}s..."
             sleep $RETRY_DELAY
           else
-            echo "❌ Download failed after $MAX_RETRIES attempts"
+            echo "::error::Download failed after $MAX_RETRIES attempts"
             exit 1
           fi
         done
         
         # Verify file is not empty
         if [ ! -s "$OUTPUT_FILE" ]; then
-          echo "❌ ERROR: Downloaded file is empty or corrupted"
+          echo "::error::Downloaded file is empty or corrupted"
           exit 1
         fi
         
         # Display file info
-        echo ""
-        echo "Downloaded image details:"
+        echo "::group::Downloaded image details"
         ls -lh "$OUTPUT_FILE"
         file "$OUTPUT_FILE"
         SIZE_BYTES=$(stat -c%s "$OUTPUT_FILE")
         SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
         echo "Size: ${SIZE_MB}MB (${SIZE_BYTES} bytes)"
+        echo "::endgroup::"
         
         # Verify checksum if provided
         CHECKSUM_INPUT="${{ github.event.inputs.RECOVERY_CHECKSUM }}"
         if [ -n "$CHECKSUM_INPUT" ]; then
-          echo ""
-          echo "Verifying checksum..."
+          echo "::group::Checksum Verification"
           COMPUTED_CHECKSUM=$(sha256sum "$OUTPUT_FILE" | awk '{print $1}')
           if [ "$COMPUTED_CHECKSUM" = "$CHECKSUM_INPUT" ]; then
             echo "✓ Checksum verified: $COMPUTED_CHECKSUM"
           else
-            echo "❌ ERROR: Checksum mismatch!"
-            echo "   Expected: $CHECKSUM_INPUT"
-            echo "   Got:      $COMPUTED_CHECKSUM"
+            echo "::error title=Checksum Mismatch::Expected: $CHECKSUM_INPUT | Got: $COMPUTED_CHECKSUM"
             exit 1
           fi
+          echo "::endgroup::"
         fi
         
         # Display first 512 bytes for debugging
-        echo ""
-        echo "First 512 bytes (hex):"
+        echo "::group::File header (hex)"
         hexdump -C -n 512 "$OUTPUT_FILE" | head -20
+        echo "::endgroup::"
 
     - name: Verify required files
       run: |
@@ -144,48 +147,47 @@ jobs:
         done
         
         if [ ${#MISSING_FILES[@]} -gt 0 ]; then
-          echo "❌ ERROR: Missing required files:"
-          printf '  - %s\n' "${MISSING_FILES[@]}"
-          echo ""
+          echo "::error::Missing required files: ${MISSING_FILES[*]}"
           echo "Repository contents:"
           ls -la
           exit 1
         fi
         
-        echo "✓ All required files verified:"
-        printf '  ✓ %s\n' "${REQUIRED_FILES[@]}"
+        echo "::notice::✓ All required files verified: ${REQUIRED_FILES[*]}"
 
     - name: Patch Process - Stage 1
       run: |
         set -euo pipefail
         
-        echo "Running patch stage 1..."
+        echo "::notice::Running patch stage 1..."
         chmod a+x script1.sh
         chmod a+x magiskboot || true
         
         if ! ./script1.sh recovery.img; then
-          echo "❌ ERROR: script1.sh failed"
-          exit 1
-        fi
-        
-        if [ ! -f recovery.img ]; then
-          echo "❌ ERROR: script1.sh did not produce recovery.img"
+          echo "::error::script1.sh execution failed"
           echo "Workspace listing:"
           ls -la
           exit 1
         fi
         
-        echo "✓ Patch stage 1 completed"
+        if [ ! -f recovery.img ]; then
+          echo "::error::script1.sh did not produce recovery.img"
+          echo "Workspace listing:"
+          ls -la
+          exit 1
+        fi
+        
+        echo "::notice::✓ Patch stage 1 completed"
 
     - name: Patch Process - Stage 2
       run: |
         set -euo pipefail
         
-        echo "Running patch stage 2..."
+        echo "::notice::Running patch stage 2..."
         chmod a+x script2.sh
         
         if ! ./script2.sh; then
-          echo "❌ ERROR: script2.sh failed"
+          echo "::error::script2.sh execution failed"
           exit 1
         fi
         
@@ -196,15 +198,35 @@ jobs:
         elif [ -f recovery-patched.img ]; then
           PATCHED_IMAGE="recovery-patched.img"
         else
-          echo "❌ ERROR: Patched image not found after script2.sh"
+          echo "::error::Patched image not found after script2.sh"
           echo "Expected: r-patched.img or recovery-patched.img"
           echo "Workspace listing:"
           ls -la
           exit 1
         fi
         
-        echo "✓ Patched image detected: $PATCHED_IMAGE"
+        echo "::notice::✓ Patched image detected: $PATCHED_IMAGE"
         echo "PATCHED_IMAGE=$PATCHED_IMAGE" >> $GITHUB_ENV
+
+    - name: Validate patched image
+      run: |
+        set -euo pipefail
+        
+        PATCHED_IMAGE="${{ env.PATCHED_IMAGE }}"
+        ORIG_SIZE=$(stat -c%s recovery.img)
+        PATCHED_SIZE=$(stat -c%s "$PATCHED_IMAGE")
+        SIZE_DIFF=$(( (PATCHED_SIZE - ORIG_SIZE) * 100 / ORIG_SIZE ))
+        
+        echo "::group::Image size comparison"
+        echo "Original size: $ORIG_SIZE bytes"
+        echo "Patched size: $PATCHED_SIZE bytes"
+        echo "Size change: $SIZE_DIFF%"
+        echo "::endgroup::"
+        
+        # Warn if size changed drastically (but don't fail)
+        if [ "$SIZE_DIFF" -lt -50 ] || [ "$SIZE_DIFF" -gt 50 ]; then
+          echo "::warning title=Large Size Change::Size changed by $SIZE_DIFF% - verify patching succeeded"
+        fi
 
     - name: Add AVB hash footer
       run: |
@@ -212,48 +234,47 @@ jobs:
         
         PATCHED_IMAGE="${{ env.PATCHED_IMAGE }}"
         
-        echo "Installing AVB tools..."
-        pip3 install --no-cache-dir 'avbtool==1.2.0'
-        
-        echo "Adding AVB hash footer to: $PATCHED_IMAGE"
+        echo "::notice::Adding AVB hash footer to: $PATCHED_IMAGE"
         
         # Verify key file permissions
         if [ ! -r phh.pem ]; then
-          echo "❌ ERROR: Cannot read phh.pem"
+          echo "::error::Cannot read phh.pem"
           exit 1
         fi
         
         # Extract public key from certificate
+        echo "::group::Extracting public key"
         if ! python3 -m avbtool extract_public_key \
           --key phh.pem \
           --output phh.pub.bin; then
-          echo "❌ ERROR: Failed to extract public key"
+          echo "::error::Failed to extract public key from phh.pem"
           exit 1
         fi
-        
         echo "✓ Public key extracted"
+        echo "::endgroup::"
         
         # Get original recovery.img size for partition_size
         if [ ! -f recovery.img ]; then
-          echo "❌ ERROR: Original recovery.img not found"
+          echo "::error::Original recovery.img not found"
           exit 1
         fi
         
         PART_SIZE=$(stat -c%s recovery.img)
-        echo "Partition size: ${PART_SIZE} bytes"
+        echo "::notice::Partition size: ${PART_SIZE} bytes"
         
         # Add AVB hash footer
+        echo "::group::Adding AVB hash footer"
         if ! python3 -m avbtool add_hash_footer \
           --partition_name recovery \
           --partition_size "$PART_SIZE" \
           --image "$PATCHED_IMAGE" \
           --key phh.pem \
           --algorithm SHA256_RSA4096; then
-          echo "❌ ERROR: Failed to add AVB hash footer"
+          echo "::error::Failed to add AVB hash footer"
           exit 1
         fi
-        
         echo "✓ AVB hash footer added successfully"
+        echo "::endgroup::"
 
     - name: Create release package
       run: |
@@ -262,7 +283,7 @@ jobs:
         PATCHED_IMAGE="${{ env.PATCHED_IMAGE }}"
         OUTPUT_DIR="output"
         
-        echo "Creating release package..."
+        echo "::notice::Creating release package..."
         
         # Create output directory
         mkdir -p "$OUTPUT_DIR"
@@ -270,39 +291,36 @@ jobs:
         # Copy patched image
         cp -f "$PATCHED_IMAGE" "$OUTPUT_DIR/recovery.img"
         
-        # Create tar archive with verbose output
+        # Create tar archive
         cd "$OUTPUT_DIR"
         tar -cvf fastbootd-recovery.tar recovery.img
         
         # Generate SHA256 checksum
         sha256sum fastbootd-recovery.tar > fastbootd-recovery.tar.sha256
         
-        # Generate MD5 checksum (legacy support)
-        md5sum fastbootd-recovery.tar > fastbootd-recovery.tar.md5
-        
-        echo ""
-        echo "Release package created:"
+        echo "::group::Release package created"
         ls -lh
+        echo "::endgroup::"
         
-        echo ""
-        echo "Checksums:"
+        echo "::group::Checksums"
         cat fastbootd-recovery.tar.sha256
-        cat fastbootd-recovery.tar.md5
+        echo "::endgroup::"
 
-    - name: Clean up temporary files
+    - name: Secure cleanup temporary files
       if: always()
       run: |
         set -euo pipefail
         
-        echo "Cleaning up temporary files..."
+        echo "::notice::Cleaning up temporary files..."
         
-        # Remove large temporary image files to save storage
-        rm -f recovery.img r-patched.img recovery-patched.img phh.pub.bin
+        # Securely remove large temporary files (3-pass overwrite)
+        for file in recovery.img r-patched.img recovery-patched.img phh.pub.bin; do
+          if [ -f "$file" ]; then
+            shred -vfz -n 3 "$file" 2>/dev/null || rm -f "$file"
+          fi
+        done
         
-        # Keep only the final release archive
-        echo "✓ Temporary files cleaned up"
-        echo "Remaining files:"
-        du -sh * 2>/dev/null || true
+        echo "::notice::✓ Temporary files securely cleaned"
 
     - name: Upload to GitHub Release
       uses: softprops/action-gh-release@v2
@@ -318,11 +336,15 @@ jobs:
           - Run ID: ${{ github.run_id }}
           - Commit: ${{ github.sha }}
           - Ref: ${{ github.ref }}
+          - Build URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          **Input Parameters:**
+          - Recovery URL: `${{ github.event.inputs.RECOVERY_URL }}`
+          - Checksum: `${{ github.event.inputs.RECOVERY_CHECKSUM }}`
           
           **Files:**
           - `fastbootd-recovery.tar` — Recovery image archive
           - `fastbootd-recovery.tar.sha256` — SHA256 checksum
-          - `fastbootd-recovery.tar.md5` — MD5 checksum (legacy)
           
           **Verification:**
           To verify the downloaded archive:
@@ -367,11 +389,12 @@ jobs:
         ❌ Recovery image build failed!
         
         📋 Troubleshooting steps:
-          1. Check workflow logs for error details
+          1. Review workflow logs for error details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           2. Verify RECOVERY_URL is accessible and valid
           3. Ensure script1.sh and script2.sh execute successfully
-          4. Verify phh.pem certificate is valid
+          4. Verify phh.pem certificate is valid and readable
           5. Check disk space: df -h
+          6. Review file permissions and required dependencies
         
         ℹ️  For more information, review the full workflow logs.
         
