@@ -14,7 +14,7 @@ jobs:
 
     steps:
     - name: Check Out
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Prepare the environment
       run: |
@@ -24,7 +24,7 @@ jobs:
       run: |
         ls
         pwd
-        wget ${{ github.event.inputs.RECOVERY_URL }} -O recovery.img
+        wget https://filebin.net/k0peejjdfgy6g3r0 -O recovery.img
 
     - name: Patch Process-1
       run: |
