@@ -4,160 +4,375 @@ on:
   workflow_dispatch:
     inputs:
       RECOVERY_URL:
-        description: 'RECOVERY URL'
+        description: 'Recovery image download URL (HTTP/HTTPS)'
         required: true
         default: 'https://files.catbox.moe/(RECOMMENDED)'
+      RECOVERY_CHECKSUM:
+        description: 'Optional SHA256 checksum for integrity verification'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-    - name: Check Out
+    - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Prepare the environment
+    - name: Prepare environment
       run: |
         set -euo pipefail
-        sudo apt update
-        sudo apt install -y git wget lz4 tar openssl python3 coreutils
+        echo "Installing dependencies..."
+        sudo apt-get update
+        sudo apt-get install -y \
+          git wget lz4 tar openssl python3 python3-pip coreutils curl
+        echo "Environment prepared successfully"
 
-    - name: Validate inputs
+    - name: Validate workflow inputs
       run: |
         set -euo pipefail
-        URL="$https://filebin.net/k0peejjdfgy6g3r0"
         
-        if [[ -z "$URL" || "$URL" == "https://files.catbox.moe/(RECOMMENDED)" ]]; then
-          echo "ERROR: Please provide a valid RECOVERY_URL (not the default placeholder)"
-          exit 1
-        fi
-        
-        echo "Recovery URL validated: $URL"
-
-    - name: Fetch image from URL
-      run: |
-        set -euo pipefail
         URL="${{ github.event.inputs.RECOVERY_URL }}"
         
-        echo "Downloading from: $URL"
-        wget --timeout=30 "$URL" -O recovery.img
+        # Check for default placeholder
+        if [[ "$URL" == "https://files.catbox.moe/(RECOMMENDED)" ]]; then
+          echo "❌ ERROR: Please provide a valid RECOVERY_URL"
+          echo "   Do not use the default placeholder value"
+          exit 1
+        fi
         
-        echo "Downloaded recovery.img:"
-        ls -lh recovery.img
-        file recovery.img
-        echo "Size (bytes): $(stat -c%s recovery.img)"
+        # Validate URL format
+        if ! [[ "$URL" =~ ^https?:// ]]; then
+          echo "❌ ERROR: Invalid URL format: $URL"
+          echo "   URL must start with http:// or https://"
+          exit 1
+        fi
+        
+        # Check if URL is reachable (HEAD request only)
+        echo "Checking URL accessibility..."
+        if ! curl -sI --max-time 10 "$URL" > /dev/null 2>&1; then
+          echo "⚠️  WARNING: URL may be unreachable, proceeding anyway..."
+        else
+          echo "✓ URL is accessible"
+        fi
+        
+        echo "✓ Recovery URL validated: $URL"
+
+    - name: Download recovery image with retry
+      run: |
+        set -euo pipefail
+        
+        URL="${{ github.event.inputs.RECOVERY_URL }}"
+        MAX_RETRIES=3
+        RETRY_DELAY=5
+        TIMEOUT=60
+        OUTPUT_FILE="recovery.img"
+        
+        echo "Downloading recovery image from: $URL"
+        
+        for attempt in $(seq 1 $MAX_RETRIES); do
+          echo "Attempt $attempt/$MAX_RETRIES..."
+          
+          if wget \
+            --timeout=$TIMEOUT \
+            --tries=1 \
+            --retry-connrefused \
+            -q --show-progress \
+            "$URL" \
+            -O "$OUTPUT_FILE" 2>&1; then
+            echo "✓ Download successful"
+            break
+          elif [ $attempt -lt $MAX_RETRIES ]; then
+            echo "⚠️  Download failed, retrying in ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          else
+            echo "❌ Download failed after $MAX_RETRIES attempts"
+            exit 1
+          fi
+        done
         
         # Verify file is not empty
-        if [ ! -s recovery.img ]; then
-          echo "ERROR: Downloaded file is empty"
+        if [ ! -s "$OUTPUT_FILE" ]; then
+          echo "❌ ERROR: Downloaded file is empty or corrupted"
           exit 1
         fi
         
+        # Display file info
+        echo ""
+        echo "Downloaded image details:"
+        ls -lh "$OUTPUT_FILE"
+        file "$OUTPUT_FILE"
+        SIZE_BYTES=$(stat -c%s "$OUTPUT_FILE")
+        SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
+        echo "Size: ${SIZE_MB}MB (${SIZE_BYTES} bytes)"
+        
+        # Verify checksum if provided
+        CHECKSUM_INPUT="${{ github.event.inputs.RECOVERY_CHECKSUM }}"
+        if [ -n "$CHECKSUM_INPUT" ]; then
+          echo ""
+          echo "Verifying checksum..."
+          COMPUTED_CHECKSUM=$(sha256sum "$OUTPUT_FILE" | awk '{print $1}')
+          if [ "$COMPUTED_CHECKSUM" = "$CHECKSUM_INPUT" ]; then
+            echo "✓ Checksum verified: $COMPUTED_CHECKSUM"
+          else
+            echo "❌ ERROR: Checksum mismatch!"
+            echo "   Expected: $CHECKSUM_INPUT"
+            echo "   Got:      $COMPUTED_CHECKSUM"
+            exit 1
+          fi
+        fi
+        
+        # Display first 512 bytes for debugging
+        echo ""
         echo "First 512 bytes (hex):"
-        hexdump -C -n 512 recovery.img
+        hexdump -C -n 512 "$OUTPUT_FILE" | head -20
 
-    - name: Verify required files exist
+    - name: Verify required files
       run: |
         set -euo pipefail
         
-        if [ ! -f script1.sh ]; then
-          echo "ERROR: script1.sh not found in repository"
+        REQUIRED_FILES=("script1.sh" "script2.sh" "phh.pem")
+        MISSING_FILES=()
+        
+        for file in "${REQUIRED_FILES[@]}"; do
+          if [ ! -f "$file" ]; then
+            MISSING_FILES+=("$file")
+          fi
+        done
+        
+        if [ ${#MISSING_FILES[@]} -gt 0 ]; then
+          echo "❌ ERROR: Missing required files:"
+          printf '  - %s\n' "${MISSING_FILES[@]}"
+          echo ""
+          echo "Repository contents:"
           ls -la
           exit 1
         fi
         
-        if [ ! -f script2.sh ]; then
-          echo "ERROR: script2.sh not found in repository"
-          ls -la
-          exit 1
-        fi
-        
-        if [ ! -f phh.pem ]; then
-          echo "ERROR: phh.pem not found in repository"
-          ls -la
-          exit 1
-        fi
-        
-        echo "All required files verified"
+        echo "✓ All required files verified:"
+        printf '  ✓ %s\n' "${REQUIRED_FILES[@]}"
 
-    - name: Patch Process-1
+    - name: Patch Process - Stage 1
       run: |
         set -euo pipefail
+        
+        echo "Running patch stage 1..."
         chmod a+x script1.sh
         chmod a+x magiskboot || true
         
-        echo "Running script1.sh..."
-        ./script1.sh recovery.img
-        
-        if [ ! -f recovery.img ]; then
-          echo "ERROR: script1.sh did not produce recovery.img"
+        if ! ./script1.sh recovery.img; then
+          echo "❌ ERROR: script1.sh failed"
           exit 1
         fi
+        
+        if [ ! -f recovery.img ]; then
+          echo "❌ ERROR: script1.sh did not produce recovery.img"
+          echo "Workspace listing:"
+          ls -la
+          exit 1
+        fi
+        
+        echo "✓ Patch stage 1 completed"
 
-    - name: Patch Process-2
+    - name: Patch Process - Stage 2
       run: |
         set -euo pipefail
+        
+        echo "Running patch stage 2..."
         chmod a+x script2.sh
         
-        echo "Running script2.sh..."
-        ./script2.sh
-
-        # Detect which patched image script2.sh produced
+        if ! ./script2.sh; then
+          echo "❌ ERROR: script2.sh failed"
+          exit 1
+        fi
+        
+        # Detect which patched image was produced
         PATCHED_IMAGE=""
         if [ -f r-patched.img ]; then
           PATCHED_IMAGE="r-patched.img"
         elif [ -f recovery-patched.img ]; then
           PATCHED_IMAGE="recovery-patched.img"
         else
-          echo "ERROR: patched image not found after script2.sh. Expected r-patched.img or recovery-patched.img."
+          echo "❌ ERROR: Patched image not found after script2.sh"
+          echo "Expected: r-patched.img or recovery-patched.img"
           echo "Workspace listing:"
           ls -la
           exit 1
         fi
+        
+        echo "✓ Patched image detected: $PATCHED_IMAGE"
+        echo "PATCHED_IMAGE=$PATCHED_IMAGE" >> $GITHUB_ENV
 
-        echo "Using patched image: $PATCHED_IMAGE"
-
-        # Install avbtool with pinned version for consistency
-        pip3 install 'avbtool>=1.2.0'
-
+    - name: Add AVB hash footer
+      run: |
+        set -euo pipefail
+        
+        PATCHED_IMAGE="${{ env.PATCHED_IMAGE }}"
+        
+        echo "Installing AVB tools..."
+        pip3 install --no-cache-dir 'avbtool==1.2.0'
+        
+        echo "Adding AVB hash footer to: $PATCHED_IMAGE"
+        
+        # Verify key file permissions
+        if [ ! -r phh.pem ]; then
+          echo "❌ ERROR: Cannot read phh.pem"
+          exit 1
+        fi
+        
         # Extract public key from certificate
-        python3 -m avbtool extract_public_key --key phh.pem --output phh.pub.bin
-
-        # Use the original recovery.img size for partition_size
+        if ! python3 -m avbtool extract_public_key \
+          --key phh.pem \
+          --output phh.pub.bin; then
+          echo "❌ ERROR: Failed to extract public key"
+          exit 1
+        fi
+        
+        echo "✓ Public key extracted"
+        
+        # Get original recovery.img size for partition_size
+        if [ ! -f recovery.img ]; then
+          echo "❌ ERROR: Original recovery.img not found"
+          exit 1
+        fi
+        
         PART_SIZE=$(stat -c%s recovery.img)
-        echo "Partition size (bytes): $PART_SIZE"
-
+        echo "Partition size: ${PART_SIZE} bytes"
+        
         # Add AVB hash footer
-        python3 -m avbtool add_hash_footer \
+        if ! python3 -m avbtool add_hash_footer \
           --partition_name recovery \
           --partition_size "$PART_SIZE" \
           --image "$PATCHED_IMAGE" \
           --key phh.pem \
-          --algorithm SHA256_RSA4096
+          --algorithm SHA256_RSA4096; then
+          echo "❌ ERROR: Failed to add AVB hash footer"
+          exit 1
+        fi
+        
+        echo "✓ AVB hash footer added successfully"
 
-        # Create output directory and package
-        mkdir -p output
-        cp -f "$PATCHED_IMAGE" output/recovery.img
+    - name: Create release package
+      run: |
+        set -euo pipefail
         
-        cd output
-        tar cvf fastbootd-recovery.tar recovery.img
+        PATCHED_IMAGE="${{ env.PATCHED_IMAGE }}"
+        OUTPUT_DIR="output"
         
-        # Create proper md5 checksum file (not appending binary data)
+        echo "Creating release package..."
+        
+        # Create output directory
+        mkdir -p "$OUTPUT_DIR"
+        
+        # Copy patched image
+        cp -f "$PATCHED_IMAGE" "$OUTPUT_DIR/recovery.img"
+        
+        # Create tar archive with verbose output
+        cd "$OUTPUT_DIR"
+        tar -cvf fastbootd-recovery.tar recovery.img
+        
+        # Generate SHA256 checksum
+        sha256sum fastbootd-recovery.tar > fastbootd-recovery.tar.sha256
+        
+        # Generate MD5 checksum (legacy support)
         md5sum fastbootd-recovery.tar > fastbootd-recovery.tar.md5
         
-        echo "Output files created:"
+        echo ""
+        echo "Release package created:"
         ls -lh
+        
+        echo ""
+        echo "Checksums:"
+        cat fastbootd-recovery.tar.sha256
+        cat fastbootd-recovery.tar.md5
 
-    - name: Upload to Release
+    - name: Clean up temporary files
+      if: always()
+      run: |
+        set -euo pipefail
+        
+        echo "Cleaning up temporary files..."
+        
+        # Remove large temporary image files to save storage
+        rm -f recovery.img r-patched.img recovery-patched.img phh.pub.bin
+        
+        # Keep only the final release archive
+        echo "✓ Temporary files cleaned up"
+        echo "Remaining files:"
+        du -sh * 2>/dev/null || true
+
+    - name: Upload to GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         files: output/fastbootd-recovery.tar*
-        name: Patched-Recovery
-        tag_name: ${{ github.run_id }}
+        name: Patched-Recovery-${{ github.run_number }}
+        tag_name: patched-recovery-${{ github.run_id }}
+        body: |
+          ## Recovery Image Build
+          
+          **Build Details:**
+          - Run: ${{ github.run_number }}
+          - Run ID: ${{ github.run_id }}
+          - Commit: ${{ github.sha }}
+          - Ref: ${{ github.ref }}
+          
+          **Files:**
+          - `fastbootd-recovery.tar` — Recovery image archive
+          - `fastbootd-recovery.tar.sha256` — SHA256 checksum
+          - `fastbootd-recovery.tar.md5` — MD5 checksum (legacy)
+          
+          **Verification:**
+          To verify the downloaded archive:
+          ```bash
+          sha256sum -c fastbootd-recovery.tar.sha256
+          ```
+        draft: false
+        prerelease: false
 
     - name: Upload Artifacts (Backup)
       uses: actions/upload-artifact@v4
       with:
-        name: recovery-artifacts
+        name: recovery-artifacts-${{ github.run_id }}
         path: output/
         retention-days: 30
+        compression-level: 6
+
+    - name: Workflow Summary
+      if: success()
+      run: |
+        cat << 'EOF'
+        
+        ✅ Recovery image build completed successfully!
+        
+        📦 Artifacts uploaded to:
+          - GitHub Releases
+          - GitHub Artifacts (retention: 30 days)
+        
+        📋 Next steps:
+          1. Download the release package
+          2. Verify checksums: sha256sum -c fastbootd-recovery.tar.sha256
+          3. Extract archive: tar -xvf fastbootd-recovery.tar
+          4. Flash recovery: fastboot flash recovery recovery.img
+        
+        EOF
+
+    - name: Error Summary
+      if: failure()
+      run: |
+        cat << 'EOF'
+        
+        ❌ Recovery image build failed!
+        
+        📋 Troubleshooting steps:
+          1. Check workflow logs for error details
+          2. Verify RECOVERY_URL is accessible and valid
+          3. Ensure script1.sh and script2.sh execute successfully
+          4. Verify phh.pem certificate is valid
+          5. Check disk space: df -h
+        
+        ℹ️  For more information, review the full workflow logs.
+        
+        EOF
