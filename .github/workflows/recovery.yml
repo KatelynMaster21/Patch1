@@ -14,43 +14,96 @@ jobs:
 
     steps:
     - name: Check Out
-      uses: actions/checkout@v6
+      uses: actions/checkout@v4
 
     - name: Prepare the environment
       run: |
+        set -euo pipefail
         sudo apt update
         sudo apt install -y git wget lz4 tar openssl python3 coreutils
 
+    - name: Validate inputs
+      run: |
+        set -euo pipefail
+        URL="$https://filebin.net/k0peejjdfgy6g3r0"
+        
+        if [[ -z "$URL" || "$URL" == "https://files.catbox.moe/(RECOMMENDED)" ]]; then
+          echo "ERROR: Please provide a valid RECOVERY_URL (not the default placeholder)"
+          exit 1
+        fi
+        
+        echo "Recovery URL validated: $URL"
+
     - name: Fetch image from URL
       run: |
-        ls -la
-        pwd
-        # download recovery image (replace URL if needed)
-        wget https://filebin.net/k0peejjdfgy6g3r0 -O recovery.img
-
+        set -euo pipefail
+        URL="${{ github.event.inputs.RECOVERY_URL }}"
+        
+        echo "Downloading from: $URL"
+        wget --timeout=30 "$URL" -O recovery.img
+        
         echo "Downloaded recovery.img:"
-        ls -lh recovery.img || true
-        file recovery.img || true
-        echo "Size (bytes): $(stat -c%s recovery.img)" || true
-
-        # Helpful: list a few bytes to help debugging (not mandatory)
+        ls -lh recovery.img
+        file recovery.img
+        echo "Size (bytes): $(stat -c%s recovery.img)"
+        
+        # Verify file is not empty
+        if [ ! -s recovery.img ]; then
+          echo "ERROR: Downloaded file is empty"
+          exit 1
+        fi
+        
         echo "First 512 bytes (hex):"
-        hexdump -C -n 512 recovery.img || true
+        hexdump -C -n 512 recovery.img
+
+    - name: Verify required files exist
+      run: |
+        set -euo pipefail
+        
+        if [ ! -f script1.sh ]; then
+          echo "ERROR: script1.sh not found in repository"
+          ls -la
+          exit 1
+        fi
+        
+        if [ ! -f script2.sh ]; then
+          echo "ERROR: script2.sh not found in repository"
+          ls -la
+          exit 1
+        fi
+        
+        if [ ! -f phh.pem ]; then
+          echo "ERROR: phh.pem not found in repository"
+          ls -la
+          exit 1
+        fi
+        
+        echo "All required files verified"
 
     - name: Patch Process-1
       run: |
+        set -euo pipefail
         chmod a+x script1.sh
         chmod a+x magiskboot || true
-        # Fail if script1.sh fails so we don't proceed with a broken state
+        
+        echo "Running script1.sh..."
         ./script1.sh recovery.img
+        
+        if [ ! -f recovery.img ]; then
+          echo "ERROR: script1.sh did not produce recovery.img"
+          exit 1
+        fi
 
     - name: Patch Process-2
       run: |
         set -euo pipefail
         chmod a+x script2.sh
+        
+        echo "Running script2.sh..."
         ./script2.sh
 
         # Detect which patched image script2.sh produced
+        PATCHED_IMAGE=""
         if [ -f r-patched.img ]; then
           PATCHED_IMAGE="r-patched.img"
         elif [ -f recovery-patched.img ]; then
@@ -64,44 +117,41 @@ jobs:
 
         echo "Using patched image: $PATCHED_IMAGE"
 
-        # Ensure key exists
-        if [ ! -f phh.pem ]; then
-          echo "ERROR: phh.pem not found. Cannot extract public key."
-          ls -la
-          exit 1
-        fi
+        # Install avbtool with pinned version for consistency
+        pip3 install 'avbtool>=1.2.0'
 
-        # Install avbtool if not present
-        if ! command -v avbtool &> /dev/null; then
-          pip3 install avbtool
-        fi
-
+        # Extract public key from certificate
         python3 -m avbtool extract_public_key --key phh.pem --output phh.pub.bin
 
         # Use the original recovery.img size for partition_size
-        if [ ! -f recovery.img ]; then
-          echo "ERROR: recovery.img not found for partition_size calculation."
-          ls -la
-          exit 1
-        fi
         PART_SIZE=$(stat -c%s recovery.img)
         echo "Partition size (bytes): $PART_SIZE"
 
-        python3 -m avbtool add_hash_footer --partition_name recovery --partition_size "$PART_SIZE" --image "$PATCHED_IMAGE" --key phh.pem --algorithm SHA256_RSA4096
+        # Add AVB hash footer
+        python3 -m avbtool add_hash_footer \
+          --partition_name recovery \
+          --partition_size "$PART_SIZE" \
+          --image "$PATCHED_IMAGE" \
+          --key phh.pem \
+          --algorithm SHA256_RSA4096
 
+        # Create output directory and package
         mkdir -p output
-        # copy the patched image into output/ as recovery.img for downstream steps
         cp -f "$PATCHED_IMAGE" output/recovery.img
+        
         cd output
         tar cvf fastbootd-recovery.tar recovery.img
+        
+        # Create proper md5 checksum file (not appending binary data)
         md5sum fastbootd-recovery.tar > fastbootd-recovery.tar.md5
-        cat fastbootd-recovery.tar >> fastbootd-recovery.tar.md5
+        
+        echo "Output files created:"
         ls -lh
 
     - name: Upload to Release
       uses: softprops/action-gh-release@v2
       with:
-        files: output/fastbootd-recovery.tar.md5
+        files: output/fastbootd-recovery.tar*
         name: Patched-Recovery
         tag_name: ${{ github.run_id }}
 
