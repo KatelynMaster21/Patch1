@@ -18,28 +18,76 @@ jobs:
 
     - name: Prepare the environment
       run: |
-        sudo apt install git wget lz4 tar openssl python3 -y
+        sudo apt update
+        sudo apt install -y git wget lz4 tar openssl python3 coreutils
 
     - name: Fetch image from URL
       run: |
-        ls
+        ls -la
         pwd
+        # download recovery image (replace URL if needed)
         wget https://filebin.net/k0peejjdfgy6g3r0 -O recovery.img
+
+        echo "Downloaded recovery.img:"
+        ls -lh recovery.img || true
+        file recovery.img || true
+        echo "Size (bytes): $(stat -c%s recovery.img)" || true
+
+        # Helpful: list a few bytes to help debugging (not mandatory)
+        echo "First 512 bytes (hex):"
+        hexdump -C -n 512 recovery.img || true
 
     - name: Patch Process-1
       run: |
         chmod a+x script1.sh
-        chmod a+x magiskboot
-        ./script1.sh recovery.img || true
+        chmod a+x magiskboot || true
+        # Fail if script1.sh fails so we don't proceed with a broken state
+        ./script1.sh recovery.img
 
     - name: Patch Process-2
       run: |
+        set -euo pipefail
         chmod a+x script2.sh
-        ./script2.sh || true
+        ./script2.sh
+
+        # Detect which patched image script2.sh produced
+        if [ -f r-patched.img ]; then
+          PATCHED_IMAGE="r-patched.img"
+        elif [ -f recovery-patched.img ]; then
+          PATCHED_IMAGE="recovery-patched.img"
+        else
+          echo "ERROR: patched image not found after script2.sh. Expected r-patched.img or recovery-patched.img."
+          echo "Workspace listing:"
+          ls -la
+          exit 1
+        fi
+
+        echo "Using patched image: $PATCHED_IMAGE"
+
+        # Ensure key exists
+        if [ ! -f phh.pem ]; then
+          echo "ERROR: phh.pem not found. Cannot extract public key."
+          ls -la
+          exit 1
+        fi
+
         python3 avbtool extract_public_key --key phh.pem --output phh.pub.bin
-        python3 avbtool add_hash_footer --partition_name recovery --partition_size $(wc -c recovery.img |cut -f 1 -d ' ') --image recovery-patched.img --key phh.pem --algorithm SHA256_RSA4096
-        mkdir output && cd output
-        mv ../r-patched.img recovery.img
+
+        # Use the original recovery.img size for partition_size
+        if [ ! -f recovery.img ]; then
+          echo "ERROR: recovery.img not found for partition_size calculation."
+          ls -la
+          exit 1
+        fi
+        PART_SIZE=$(stat -c%s recovery.img)
+        echo "Partition size (bytes): $PART_SIZE"
+
+        python3 avbtool add_hash_footer --partition_name recovery --partition_size "$PART_SIZE" --image "$PATCHED_IMAGE" --key phh.pem --algorithm SHA256_RSA4096
+
+        mkdir -p output
+        # copy the patched image into output/ as recovery.img for downstream steps
+        cp -f "$PATCHED_IMAGE" output/recovery.img
+        cd output
         tar cvf fastbootd-recovery.tar recovery.img
         md5sum -t fastbootd-recovery.tar >> fastbootd-recovery.tar
         mv fastbootd-recovery.tar fastbootd-recovery.tar.md5
