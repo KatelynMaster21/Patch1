@@ -19,12 +19,42 @@ jobs:
     permissions:
       contents: write
 
-    steps:
+        - name: Prepare environment and install dependencies
+      run: |
+        set -euo pipefail
+        echo "::group::Installing dependencies"
+        sudo apt-get update
+        sudo apt-get install -y \
+          git wget lz4 tar openssl python3 python3-pip coreutils curl
+        echo "::endgroup::"
+        
+        echo "::group::Installing Python tools"
+        # Clone Android's avbtool from AOSP
+        git clone https://android.googlesource.com/platform/external/avb /tmp/avb
+        export PYTHONPATH="/tmp/avb:$PYTHONPATH"
+        echo "::endgroup::"
+        
+        echo "::notice title=Environment::Environment prepared successfully"
     - name: Checkout repository
       uses: actions/checkout@v6
 
     - name: Prepare environment and install dependencies
+          - name: Prepare environment and install dependencies
       run: |
+        set -euo pipefail
+        echo "::group::Installing dependencies"
+        sudo apt-get update
+        sudo apt-get install -y \
+          git wget lz4 tar openssl python3 python3-pip coreutils curl
+        echo "::endgroup::"
+        
+        echo "::group::Installing Python tools"
+        # Clone Android's avbtool from AOSP
+        git clone https://android.googlesource.com/platform/external/avb /tmp/avb
+        export PYTHONPATH="/tmp/avb:$PYTHONPATH"
+        echo "::endgroup::"
+        
+        echo "::notice title=Environment::Environment prepared successfully"
         set -euo pipefail
         echo "::group::Installing dependencies"
         sudo apt-get update
